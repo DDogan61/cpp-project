@@ -1,0 +1,280 @@
+# Hover → Click: değişen kısımlar
+
+Referans: senin ilk verdiğin `Flamechartview.cs` ve `SamplerWindowControl.xaml.cs`.
+
+---
+
+## 1. Bilgi sınıfının adı
+
+**ÖNCE**
+```csharp
+// Farenin uzerinde durdugu kutunun ozeti. Line == 0 ise satir bilgisi yok
+// ([external] ya da PDB'siz kod).
+public sealed class FlameHoverInfo
+{
+    public string Name;
+    public double StartMs;
+    public double EndMs;
+
+    public int Line;
+    public double LineStartMs;
+    public double LineEndMs;
+
+    public double DurationMs { get { return EndMs - StartMs; } }
+    public double LineDurationMs { get { return LineEndMs - LineStartMs; } }
+}
+```
+
+**SONRA** — sadece iki satır: yorum ve sınıf adı. Alanlar aynı.
+```csharp
+// Tiklanan kutunun ozeti. Line == 0 ise satir bilgisi yok
+// ([external] ya da PDB'siz kod).
+public sealed class FlameSelectionInfo
+{
+    ... (aynen) ...
+}
+```
+
+---
+
+## 2. Alanlar
+
+**ÖNCE**
+```csharp
+private FlameChartModel _model;
+private FlameRun _hover;
+private LineSegment _hoverSegment;
+private double _pxPerMs = 0.4;
+```
+
+**SONRA**
+```csharp
+private FlameChartModel _model;
+private FlameRun _selected;
+private LineSegment _selectedSegment;
+private double _pxPerMs = 0.4;
+```
+
+Bir de kalem alanı ekleniyor, diğer `static readonly Pen`'lerin yanına:
+```csharp
+private static readonly Pen SelectionPen = MakeSelectionPen();
+```
+
+---
+
+## 3. Fare bölümü — komple değişiyor
+
+**ÖNCE**
+```csharp
+public event Action<FlameHoverInfo> HoverChanged;
+
+protected override void OnMouseMove(MouseEventArgs e)
+{
+    base.OnMouseMove(e);
+
+    Point p = e.GetPosition(this);
+    FlameRun run = HitTest(p);
+    LineSegment segment = run == null ? null : SegmentAt(run, p.X / _pxPerMs);
+
+    // Ayni kutu ve ayni bolmedeysek olay tetiklemiyoruz; her fare
+    // hareketinde arayuz guncellemek gereksiz.
+    if (ReferenceEquals(run, _hover) && ReferenceEquals(segment, _hoverSegment)) return;
+
+    _hover = run;
+    _hoverSegment = segment;
+
+    RaiseHover(run, segment);
+}
+
+protected override void OnMouseLeave(MouseEventArgs e)
+{
+    base.OnMouseLeave(e);
+
+    if (_hover == null && _hoverSegment == null) return;
+
+    _hover = null;
+    _hoverSegment = null;
+
+    RaiseHover(null, null);
+}
+
+private void RaiseHover(FlameRun run, LineSegment segment)
+{
+    Action<FlameHoverInfo> handler = HoverChanged;
+    if (handler == null) return;
+
+    if (run == null) { handler(null); return; }
+
+    handler(new FlameHoverInfo
+    {
+        Name = run.Name,
+        StartMs = run.StartMs,
+        EndMs = run.EndMs,
+        Line = segment == null ? 0 : segment.Line,
+        LineStartMs = segment == null ? 0 : segment.StartMs,
+        LineEndMs = segment == null ? 0 : segment.EndMs
+    });
+}
+```
+
+**SONRA** — `OnMouseMove` ve `OnMouseLeave` siliniyor, yerlerine bunlar:
+```csharp
+// Bir kutuya tiklaninca tetiklenir; bos alana tiklaninca null ile
+// tetiklenir. Bilgiyi nerede gosterecegine cagiran karar verir.
+public event Action<FlameSelectionInfo> SelectionChanged;
+
+protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
+{
+    base.OnMouseLeftButtonDown(e);
+
+    Point p = e.GetPosition(this);
+
+    _selected = HitTest(p);
+    _selectedSegment = _selected == null ? null : SegmentAt(_selected, p.X / _pxPerMs);
+
+    InvalidateVisual();   // cerceve
+    RaiseSelection();
+
+    e.Handled = true;
+}
+
+// ====================================================================
+// Timer'dan cagriliyor.
+//
+// Secili run kosu boyunca uzuyor: kutu ayni kutu ama sure, bitis ve
+// satir bolmesi degisiyor. Secim referansla tutuldugu icin tekrar
+// hit-test'e gerek yok, bilgiyi yeniden yaymak yeterli.
+// ====================================================================
+public void RefreshSelection()
+{
+    if (_selected == null) return;
+
+    RaiseSelection();
+}
+
+private void RaiseSelection()
+{
+    Action<FlameSelectionInfo> handler = SelectionChanged;
+    if (handler == null) return;
+
+    if (_selected == null) { handler(null); return; }
+
+    handler(new FlameSelectionInfo
+    {
+        Name = _selected.Name,
+        StartMs = _selected.StartMs,
+        EndMs = _selected.EndMs,
+        Line = _selectedSegment == null ? 0 : _selectedSegment.Line,
+        LineStartMs = _selectedSegment == null ? 0 : _selectedSegment.StartMs,
+        LineEndMs = _selectedSegment == null ? 0 : _selectedSegment.EndMs
+    });
+}
+```
+
+`RaiseHover` → `RaiseSelection`: parametreler kalkıyor, gövdede `run` → `_selected`,
+`segment` → `_selectedSegment`. Gerisi birebir aynı.
+
+`HitTest`, `SegmentAt`, `OnMouseWheel` değişmiyor.
+
+---
+
+## 4. Seçili kutunun çerçevesi — `DrawRuns` içinde
+
+**ÖNCE**
+```csharp
+var rect = new Rect(x, y, Math.Max(w - 1, 0.5), RowHeight - 1);
+dc.DrawRectangle(BrushFor(run.Name), null, rect);
+
+// Ic cizimler kutunun disina tasmasin.
+dc.PushClip(new RectangleGeometry(rect));
+
+double nameEnd = x;
+```
+
+**SONRA** — `PushClip`'ten sonra üç satır. Clip'in içinde olması şart:
+2px kalemin dışa taşan yarısı kırpılıyor, komşu kutunun üstüne binmiyor.
+```csharp
+var rect = new Rect(x, y, Math.Max(w - 1, 0.5), RowHeight - 1);
+dc.DrawRectangle(BrushFor(run.Name), null, rect);
+
+// Ic cizimler kutunun disina tasmasin.
+dc.PushClip(new RectangleGeometry(rect));
+
+// Cerceve clip'in icinde: kalin kalemin disa tasan yarisi
+// kirpiliyor, komsu kutunun uzerine binmiyor.
+if (ReferenceEquals(run, _selected))
+{
+    dc.DrawRectangle(null, SelectionPen, rect);
+}
+
+double nameEnd = x;
+```
+
+---
+
+## 5. Yeni fabrika metodu
+
+Diğer `Make...Pen` metotlarının yanına:
+```csharp
+private static Pen MakeSelectionPen()
+{
+    var pen = new Pen(Frozen(Color.FromRgb(20, 20, 20)), 2);
+    pen.Freeze();
+    return pen;
+}
+```
+
+---
+
+## 6. `SamplerWindowControl.xaml.cs` — üç yer
+
+**Constructor**
+```csharp
+// ÖNCE
+chart.HoverChanged += Chart_HoverChanged;
+
+// SONRA
+chart.SelectionChanged += Chart_SelectionChanged;
+```
+
+**Handler imzası** — gövde aynen kalıyor
+```csharp
+// ÖNCE
+private void Chart_HoverChanged(FlameHoverInfo info)
+
+// SONRA
+private void Chart_SelectionChanged(FlameSelectionInfo info)
+```
+
+**`Timer_Tick` içinde**
+```csharp
+// ÖNCE
+chart.RefreshHover();
+
+// SONRA
+chart.RefreshSelection();
+```
+
+---
+
+## 7. XAML — tek satır
+
+```xml
+<!-- ÖNCE -->
+<TextBlock Text="Hover" FontWeight="Bold" Margin="0,0,0,4"/>
+
+<!-- SONRA -->
+<TextBlock Text="Selected" FontWeight="Bold" Margin="0,0,0,4"/>
+```
+
+`x:Name`'ler (`txtHoverFn`, `txtHoverLine`, `txtHoverRange`, `txtHoverDuration`)
+değişmiyor — code-behind ile isim uyuşmazlığı riski olmasın.
+
+---
+
+## Davranış farkları
+
+- Boş alana tıklamak seçimi kaldırıyor (`null` yayılıyor, panel temizleniyor).
+- Fare kutudan çıkınca seçim duruyor.
+- `RefreshSelection` fareye hiç bakmıyor; hover'da follow modunda grafik farenin
+  altından kaydığı için her tick'te yeniden hit-test gerekiyordu, artık gerekmiyor.
