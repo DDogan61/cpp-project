@@ -1,0 +1,225 @@
+# Fonksiyon isimlerinin kayması: değişen kısımlar
+
+Referans: senin ilk verdiğin `Flamechartview.cs` ve `SamplerWindowControl.xaml.cs`.
+
+Amaç: kutu soldan ekran dışına taştığında fonksiyon adı görünür kenara yapışsın,
+kutu ilerledikçe yazı da onunla kaysın.
+
+---
+
+## Neden gerekli
+
+`FlameChartView`, `ScrollViewer`'ın içinde **tam boyuyla** duruyor. Kaydırma
+yapıldığında eleman yeniden çizilmiyor, sadece görüntüsü kaydırılıyor. Yani
+eleman kendisinin nerede görüntülendiğini bilmiyor. Görünür aralığı dışarıdan
+vermek gerekiyor.
+
+---
+
+## 1. Code-behind — senin satırın yerine
+
+**ÖNCE** — `HorizontalAlignment` WPF'in hizalama enum'ı (`Left`/`Center`/`Right`/
+`Stretch`), `double` atanamıyor, derlenmiyor.
+```csharp
+private void Scroller_ScrollChanged(object sender, ScrollChangedEventArgs e)
+{
+    chart.HorizontalAlignment = e.HorizontalOffset;
+}
+```
+
+**SONRA**
+```csharp
+// Chart, ScrollViewer'in icinde tam boyuyla duruyor; kaydirinca kendisi
+// haberdar olmuyor. Gorunur araligi biz veriyoruz: fonksiyon isimleri
+// buna gore gorunur kenara yapisiyor, ekran disi kutular atlanabiliyor.
+private void Scroller_ScrollChanged(object sender, ScrollChangedEventArgs e)
+{
+    chart.SetViewport(e.HorizontalOffset, e.ViewportWidth);
+}
+```
+
+Constructor'daki `scroller.ScrollChanged += Scroller_ScrollChanged;` aynen kalıyor.
+
+---
+
+## 2. Sabit ve alanlar
+
+Sabit, diğer `private const double`'ların yanına:
+```csharp
+private const double TextPad = 3;
+```
+
+Alanlar, `_pxPerMs`'in yanına:
+```csharp
+// ScrollViewer'in bize bildirdigi gorunur pencere. Isimleri gorunur
+// kenara yapistirmak ve gorunmeyen kutulari atlamak icin lazim.
+private double _scrollX;
+private double _viewportWidth;
+```
+
+---
+
+## 3. Yeni metotlar
+
+```csharp
+// ====================================================================
+// ScrollViewer.ScrollChanged'den besleniyor.
+//
+// Element ScrollViewer'in icinde tam boyuyla duruyor; kaydirma sirasinda
+// OnRender tekrar cagrilmiyor. O yuzden gorunur aralik disaridan
+// veriliyor ve degistiginde biz cizimi tazeliyoruz. Sadece
+// InvalidateVisual: genislik degismedi, olcum almaya gerek yok.
+// ====================================================================
+public void SetViewport(double offsetX, double viewportWidth)
+{
+    if (Math.Abs(offsetX - _scrollX) < 0.5 &&
+        Math.Abs(viewportWidth - _viewportWidth) < 0.5) return;
+
+    _scrollX = offsetX;
+    _viewportWidth = viewportWidth;
+
+    InvalidateVisual();
+}
+```
+
+```csharp
+// ScrollChanged henuz gelmediyse (ilk kare) tum elemani gorunur say;
+// aksi halde hicbir sey cizilmiyor.
+private double VisibleWidth()
+{
+    return _viewportWidth > 0 ? _viewportWidth : Math.Max(1, RenderSize.Width);
+}
+```
+
+`VisibleWidth`'i atlama: ilk karede `_viewportWidth` sıfırdır, kırpma da o zaman
+her kutuyu eler ve **boş grafik** görürsün.
+
+---
+
+## 4. `OnRender` — görünür aralığı hesapla, aşağı geçir
+
+**ÖNCE**
+```csharp
+DrawRuns(dc, dpi);
+```
+
+**SONRA**
+```csharp
+double viewLeft = _scrollX;
+double viewRight = viewLeft + VisibleWidth();
+
+DrawRuns(dc, dpi, viewLeft, viewRight);
+```
+
+---
+
+## 5. `DrawRuns` — imza ve gövde
+
+**ÖNCE**
+```csharp
+private void DrawRuns(DrawingContext dc, double dpi)
+{
+    ...
+            // Yarim pikselden dar kutu gorunmuyor, cizmeye degmez.
+            if (w < 0.5) continue;
+
+            var rect = new Rect(x, y, Math.Max(w - 1, 0.5), RowHeight - 1);
+            dc.DrawRectangle(BrushFor(run.Name), null, rect);
+
+            dc.PushClip(new RectangleGeometry(rect));
+
+            double nameEnd = x;
+
+            if (w >= MinNameWidth)
+            {
+                FormattedText nameText = NameTextFor(run.Name, dpi);
+                dc.DrawText(nameText, new Point(x + 3, y + 1));
+                nameEnd = x + 3 + nameText.Width + 6;
+            }
+
+            DrawLineSegments(dc, run, y, nameEnd, dpi);
+
+            dc.Pop();
+    ...
+}
+```
+
+**SONRA**
+```csharp
+private void DrawRuns(DrawingContext dc, double dpi, double viewLeft, double viewRight)
+{
+    ...
+            // Yarim pikselden dar kutu gorunmuyor, cizmeye degmez.
+            if (w < 0.5) continue;
+
+            // Ekranin disindaki kutular icin cizim komutu uretmiyoruz.
+            // Run'lar StartMs'e gore sirali oldugundan sagdaki ilk
+            // kutuda satirin geri kalanini birakabiliyoruz.
+            if (x > viewRight) break;
+            if (x + w < viewLeft) continue;
+
+            var rect = new Rect(x, y, Math.Max(w - 1, 0.5), RowHeight - 1);
+            dc.DrawRectangle(BrushFor(run.Name), null, rect);
+
+            dc.PushClip(new RectangleGeometry(rect));
+
+            double nameEnd = x;
+
+            if (w >= MinNameWidth)
+            {
+                FormattedText nameText = NameTextFor(run.Name, dpi);
+
+                // Kutu soldan disari tasmissa isim gorunur kenara
+                // yapisir; kutu ilerledikce yazi da onunla kayar.
+                double textX = Math.Max(x + TextPad, viewLeft + TextPad);
+
+                // Ama kutunun sag kenarindan disari cikmasin: uzun
+                // isimde clip zaten keserdi, boylece son ana kadar
+                // olabildigince cok harf gorunuyor.
+                double maxX = x + w - nameText.Width - TextPad;
+                if (textX > maxX) textX = Math.Max(x + TextPad, maxX);
+
+                dc.DrawText(nameText, new Point(textX, y + 1));
+                nameEnd = textX + nameText.Width + 6;
+            }
+
+            DrawLineSegments(dc, run, y, nameEnd, dpi);
+
+            dc.Pop();
+    ...
+}
+```
+
+Üç ayrı şey oldu, karıştırma:
+
+| satır | ne yapıyor | zorunlu mu |
+|---|---|---|
+| `if (x > viewRight) break;` + `if (x + w < viewLeft) continue;` | ekran dışı kutuları atlıyor | hayır, sadece performans |
+| `double textX = Math.Max(x + TextPad, viewLeft + TextPad);` | **asıl kayma** | evet |
+| `maxX` kontrolü | yazıyı kutunun sağından taşırmıyor | evet |
+| `nameEnd = textX + ...` (eskiden `x + 3 + ...`) | satır no'ları isimle çakışmasın | evet |
+
+---
+
+## Kayma nasıl çalışıyor
+
+`x` kutunun mutlak konumu, `viewLeft` görünür pencerenin sol kenarı.
+
+- Kutu tamamen görünürse `x + TextPad > viewLeft + TextPad` olur, `Math.Max`
+  eski davranışı verir: yazı kutunun solunda.
+- Kutu soldan taşmışsa `x` küçüktür, `Math.Max` `viewLeft + TextPad`'i seçer:
+  yazı ekranın sol kenarına yapışır.
+- Kutunun sağ kenarı yaklaşınca `maxX` devreye girer, yazı kutuyla birlikte
+  sola doğru kayıp çıkar.
+
+Yazının kutu dışına taşmaması ayrıca `PushClip` sayesinde garanti.
+
+---
+
+## Elle yazarken
+
+- `TextPad` sabitini tanımlamayı unutma, dört yerde geçiyor.
+- Kırpma satırlarını (`break`/`continue`) atlayabilirsin, kaymayı bozmaz.
+- `VisibleWidth`'i atlarsan ilk kare boş gelir.
+- `SetViewport` içindeki 0.5'lik eşik gereksiz `InvalidateVisual` çağrılarını
+  eliyor; atlarsan çalışır ama her piksel kaymada yeniden çizim olur.
