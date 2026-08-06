@@ -1,0 +1,210 @@
+# Cetvel (timeline): değişen kısımlar
+
+Referans: senin ilk verdiğin `Flamechartview.cs`.
+`DrawTimeline` metodunun kendisi senin yazdığın haliyle duruyor, ona dokunmadım.
+Aşağıdakiler onun **çalışması ve görünmesi** için gereken 6 ek.
+
+---
+
+## 1. Sabit
+
+Diğer `private const double` satırlarının yanına:
+
+```csharp
+private const double TimelineHeight = 24;   // eksen + 6px tirnak + etiket
+```
+
+24 rakamı `DrawTimeline`'daki `y + 8` ve font 10 ile uyumlu.
+
+---
+
+## 2. Brush alanı
+
+Sınıfta `TextBrush` diye bir şey yoktu, `DrawTimeline` onsuz **derlenmiyor**.
+`LineNoBrush`'ın altına:
+
+```csharp
+private static readonly Brush TextBrush = Frozen(Color.FromRgb(40, 40, 40));
+```
+
+`Frozen` yardımcısı sende yoksa iki satır, aynı şey:
+
+```csharp
+var brush = new SolidColorBrush(Color.FromRgb(40, 40, 40));
+brush.Freeze();
+```
+
+`Freeze()`'i atlama: dondurulmamış brush her çizimde thread affinity kontrolü
+ve değişiklik bildirimi masrafı getiriyor.
+
+---
+
+## 3. `MeasureOverride` — cetvel için yer
+
+Bu olmadan cetvel çiziliyor ama elemanın ölçülen yüksekliğinin dışında kaldığı
+için `ScrollViewer` kırpıyor, hiç görünmüyor.
+
+**ÖNCE**
+```csharp
+protected override Size MeasureOverride(Size availableSize)
+{
+    if (_model == null) return new Size(1, RowHeight);
+
+    return new Size(Math.Max(1, _model.TotalMs * _pxPerMs),
+                    Math.Max(RowHeight, _model.Depth * RowHeight));
+}
+```
+
+**SONRA** — her iki `return`'e de pay ekleniyor
+```csharp
+protected override Size MeasureOverride(Size availableSize)
+{
+    if (_model == null) return new Size(1, RowHeight + TimelineHeight);
+
+    // Cetvel kutularin altinda duruyor; yuksekligi olcumde hesaba
+    // katilmazsa ScrollViewer o seridi kirpiyor.
+    return new Size(Math.Max(1, _model.TotalMs * _pxPerMs),
+                    Math.Max(RowHeight, _model.Depth * RowHeight) + TimelineHeight);
+}
+```
+
+---
+
+## 4. `OnRender` — çağrı
+
+**ÖNCE**
+```csharp
+DrawRuns(dc, dpi);
+
+// Cizgiler kutulardan SONRA: altta kalsalardi grafigin dolu
+// kisminda hic gorunmezlerdi, ki en cok orada lazimlar.
+DrawTimeGrid(dc);
+```
+
+**SONRA**
+```csharp
+DrawRuns(dc, dpi);
+
+// Cizgiler kutulardan SONRA: altta kalsalardi grafigin dolu
+// kisminda hic gorunmezlerdi, ki en cok orada lazimlar.
+DrawTimeGrid(dc);
+DrawTimeline(dc, dpi);
+```
+
+`dpi` metodun başında zaten var: `VisualTreeHelper.GetDpi(this).PixelsPerDip`.
+`FormattedText`'in son parametresi bunu istediği için `DrawTimeline`'ın imzası
+`(DrawingContext dc, double dpi)`.
+
+---
+
+## 5. `DrawTimeGrid` — tek satır
+
+Uzun dikey çizgilerin cetvelin içinden geçip tırnakların arasına girmesinin
+sebebi buydu. `RenderSize.Height` artık `+ TimelineHeight` kadar büyük.
+
+**ÖNCE**
+```csharp
+double height = RenderSize.Height;
+```
+
+**SONRA**
+```csharp
+// RenderSize.Height artik cetveli de kapsiyor; oraya kadar cizersek
+// cizgiler eksenin icinden gecip tirnaklarin arasina giriyor.
+double height = _model.Depth * RowHeight;
+```
+
+Bu değer `DrawTimeline`'daki `double y = _model.Depth * RowHeight;` ile birebir
+aynı olmalı. Birini değiştirirsen diğerini de değiştir, yoksa çizgiler eksenin
+bir-iki piksel altında/üstünde kesilir.
+
+---
+
+## 6. `MakeGridPen` — kesik çizgi kalkıyor
+
+**ÖNCE**
+```csharp
+private static Pen MakeGridPen()
+{
+    var pen = new Pen(Frozen(Color.FromRgb(110, 110, 110)), 1);
+
+    // Kesikli cizgi duz cizgiden pahali; Pen'i her karede kurma.
+    pen.DashStyle = new DashStyle(new double[] { 3, 3 }, 0);
+    pen.Freeze();   // Freeze alt Freezable'lari da donduruyor
+    return pen;
+}
+```
+
+**SONRA** — `DashStyle` satırı siliniyor
+```csharp
+private static Pen MakeGridPen()
+{
+    // Duz cizgi: DashStyle her cizgiyi parcalara bolup ayri geometri
+    // uretiyordu, yuzlerce cizgide kare suresi belirgin artiyor.
+    var pen = new Pen(Frozen(Color.FromRgb(110, 110, 110)), 1);
+    pen.Freeze();   // Freeze alt Freezable'lari da donduruyor
+    return pen;
+}
+```
+
+---
+
+## 7. `DrawTimeline` — senin metodun (değişmedi)
+
+```csharp
+private void DrawTimeline(DrawingContext dc, double dpi)
+{
+    double y = _model.Depth * RowHeight;
+    Pen axisPen = new Pen(Brushes.Black, 1);
+    dc.DrawLine(axisPen, new Point(0, y), new Point(RenderSize.Width, y));
+    double step = GridStepMs();
+    for (double ms = 0; ms <= _model.TotalMs; ms += step)
+    {
+        double x = Math.Round(ms * _pxPerMs) + 0.5;
+        dc.DrawLine(axisPen, new Point(x, y), new Point(x, y + 6));
+        FormattedText text = new FormattedText($"{ms:0} ms", CultureInfo.InvariantCulture,
+                                               FlowDirection.LeftToRight, Face, 10, TextBrush, dpi);
+        dc.DrawText(text, new Point(x + 3, y + 8));
+    }
+}
+```
+
+İçindeki `Face`, `GridStepMs()`, `_pxPerMs`, `_model.TotalMs`, `RenderSize.Width`
+sınıfta zaten var, dışarıdan bir şey gerekmiyor.
+
+---
+
+## Kim neyi çiziyor
+
+```
+OnRender
+├── DrawRuns        -> kutular
+├── DrawTimeGrid    -> uzun dikey cizgiler, 0'dan Depth*RowHeight'a
+└── DrawTimeline    -> eksen (Depth*RowHeight), tirnaklar (+6), etiketler (+8)
+```
+
+İkisi de aynı `GridStepMs()`'i kullandığı için tırnaklar çizgilerle hizalı.
+Ayrı sabit kullanırsan zoom'la birlikte kayarlar.
+
+---
+
+## Elle yazarken
+
+Atlanması en kolay iki yer 3 ve 5. İkisi de "kod yanlış" gibi görünmeyen,
+sadece görüntüde bozulan hatalar:
+
+- `TimelineHeight` `MeasureOverride`'a girmezse -> cetvel çizilir, kırpılır, görünmez.
+- `height` düzeltilmezse -> çizgiler tırnakların ve etiketlerin arasından geçer.
+
+---
+
+## Bilinen eksik
+
+Cetvel içerikle birlikte **dikey** kayıyor. Derinlik ekrana sığmayınca aşağı
+kaydırdığında görünmez oluyor. Sabitlemek istersen `ScrollViewer`'ın dışına,
+alta ayrı bir şerit olarak çıkarmak gerekir.
+
+`new Pen(...)` ve etiket başına `new FormattedText` her `OnRender`'da yeniden
+kuruluyor. Grafik uzadıkça etiket sayısı arttığı için 50 ms'lik tick'te takılma
+hissedersen: `axisPen`'i `static readonly` yapmak tek satır, `FormattedText`
+için de `Dictionary<double, FormattedText>` önbelleği eklenebilir.
