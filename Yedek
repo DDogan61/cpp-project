@@ -1,0 +1,117 @@
+private string ResolveTargetExe(out string solutionFolder)
+{
+    ThreadHelper.ThrowIfNotOnUIThread();
+
+    var dte = Package.GetGlobalService(typeof(SDTE)) as DTE2;
+
+    // The check has to come before the first use, otherwise FullName
+    // throws on its own and the message below is never seen.
+    if (dte == null || dte.Solution == null || !dte.Solution.IsOpen)
+    {
+        throw new InvalidOperationException("No solution is open in this VS instance.");
+    }
+
+    solutionFolder = Path.GetDirectoryName(dte.Solution.FullName);
+
+    // Startup project straight from the build manager. DTE's StartupProjects
+    // hands back a unique name that Solution.Item cannot always find again
+    // when the project sits inside a solution folder.
+    var sbm = Package.GetGlobalService(typeof(SVsSolutionBuildManager))
+              as IVsSolutionBuildManager;
+
+    IVsHierarchy hierarchy;
+    ErrorHandler.ThrowOnFailure(sbm.get_StartupProject(out hierarchy));
+
+    if (hierarchy == null)
+    {
+        throw new InvalidOperationException("No startup project is selected.");
+    }
+
+    // The configuration the project is mapped to under the active solution
+    // configuration. In a multi project solution these two are not the same:
+    // solution "Debug|x64" can map a project to "Debug|Win32", and asking for
+    // the wrong one gives us the TargetPath of a folder never built.
+    var cfgs = new IVsProjectCfg[1];
+    ErrorHandler.ThrowOnFailure(
+        sbm.FindActiveProjectCfg(IntPtr.Zero, IntPtr.Zero, hierarchy, cfgs));
+
+    string configName;
+    ErrorHandler.ThrowOnFailure(cfgs[0].get_CanonicalName(out configName));
+
+    var storage = hierarchy as IVsBuildPropertyStorage;
+    if (storage == null)
+    {
+        throw new InvalidOperationException("Project does not expose MSBuild properties.");
+    }
+
+    // The project file path, for resolving a relative OutDir and the macros
+    // on the Debugging page.
+    string projectFile;
+    ErrorHandler.ThrowOnFailure(
+        ((IVsProject)hierarchy).GetMkDocument(VSConstants.VSITEMID_ROOT, out projectFile));
+
+    string projDir = Path.GetDirectoryName(projectFile);
+
+    // F5 builds the startup project before launching. Without this we either
+    // find no exe at all in a configuration that was never built, or worse,
+    // silently profile a stale one after a source change.
+    var solution = Package.GetGlobalService(typeof(SVsSolution)) as IVsSolution;
+
+    string uniqueName;
+    ErrorHandler.ThrowOnFailure(
+        solution.GetUniqueNameOfProject(hierarchy, out uniqueName));
+
+    SolutionBuild slnBuild = dte.Solution.SolutionBuild;
+
+    // The last argument waits for the build to finish. Asynchronous would mean
+    // starting the sampler on a half written exe.
+    slnBuild.BuildProject(slnBuild.ActiveConfiguration.Name, uniqueName, true);
+
+    if (slnBuild.LastBuildInfo != 0)
+    {
+        throw new InvalidOperationException("Build failed, see the Output window.");
+    }
+
+    string targetPath = GetBuildProperty(storage, "TargetPath", configName);
+
+    // On some project types TargetPath comes back empty, so we put it
+    // together from the pieces.
+    if (string.IsNullOrWhiteSpace(targetPath))
+    {
+        string outDir = GetBuildProperty(storage, "OutDir", configName);
+        string fileName = GetBuildProperty(storage, "TargetFileName", configName);
+
+        if (!string.IsNullOrWhiteSpace(outDir) && !string.IsNullOrWhiteSpace(fileName))
+        {
+            // A relative OutDir is resolved against the project folder,
+            // and if it is absolute Path.Combine drops the left side anyway.
+            targetPath = Path.GetFullPath(Path.Combine(projDir, outDir, fileName));
+        }
+    }
+
+    if (string.IsNullOrWhiteSpace(targetPath))
+    {
+        throw new InvalidOperationException(
+            "Cannot resolve the target exe path (" + configName + ").");
+    }
+
+    // A successful build is not a guarantee: with the project unchecked in the
+    // Configuration Manager, BuildProject quietly does nothing.
+    if (!File.Exists(targetPath))
+    {
+        throw new InvalidOperationException(
+            "Target exe not found (" + configName + "), build the project first: " + targetPath);
+    }
+
+    // How the target should be started. We read the settings the user
+    // already entered so it behaves the same as F5.
+    _debugArgs = ExpandMacros(
+        GetUserProperty(storage, "LocalDebuggerCommandArguments", configName),
+        projDir, solutionFolder);
+
+    _debugWorkDir = ExpandMacros(
+        GetUserProperty(storage, "LocalDebuggerWorkingDirectory", configName),
+        projDir, solutionFolder);
+
+    return targetPath;
+}
