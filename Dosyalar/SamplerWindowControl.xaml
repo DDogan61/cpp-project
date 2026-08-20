@@ -1,0 +1,104 @@
+﻿<UserControl x:Class="FlameCharter.SamplerWindowControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:FlameCharter"
+             Name="FlameCharter">
+
+    <UserControl.Resources>
+        <Style x:Key="Section" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Margin" Value="0,0,0,4"/>
+        </Style>
+
+        <!-- MinHeight: an empty TextBlock measures as zero height, so the panel
+             was jumping around on every update. TextTrimming: a long name gets
+             cut instead of wrapping, so it always stays one line. -->
+        <Style x:Key="Value" TargetType="TextBlock">
+            <Setter Property="MinHeight" Value="16"/>
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+
+        <Style x:Key="Mono" TargetType="TextBlock" BasedOn="{StaticResource Value}">
+            <Setter Property="FontFamily" Value="Consolas"/>
+        </Style>
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <!-- Fixed width so the chart area does not shift as the panel text
+                 changes. -->
+            <ColumnDefinition Width="250"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <StackPanel Grid.Column="0" Margin="8">
+            <TextBlock Text="Target" Style="{StaticResource Section}"/>
+
+            <!-- The ToolTip binds to the TextBlock's own Text, so whatever the
+                 trimming cut off can still be read by hovering. Same trick on
+                 the two long fields below. -->
+            <TextBlock x:Name="txtTarget" Text="Not attached - run with F5 first"
+                       Style="{StaticResource Value}" Margin="0,0,0,8"
+                       ToolTip="{Binding RelativeSource={RelativeSource Self}, Path=Text}"/>
+
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBlock x:Name="txtInterval" Text="Interval (ms): "
+                           Width="95" VerticalAlignment="Center"/>
+                <TextBox x:Name="tbInterval" Text="10" Width="45"
+                         PreviewTextInput="tbInterval_PreviewTextInput"/>
+            </StackPanel>
+
+            <!-- One button rather than two: it attaches to the process already
+                 running under the debugger and detaches from it, and whatever
+                 the button says is what pressing it does. -->
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                <Button x:Name="btnToggle" Content="Activate" Width="90"
+                        Click="btnToggle_Click"/>
+                <CheckBox x:Name="chkFollow" Content="Follow" IsChecked="True"
+                          VerticalAlignment="Center" Margin="10,0,0,0"/>
+            </StackPanel>
+
+            <TextBlock x:Name="txtStatus" Text="idle" Style="{StaticResource Value}"/>
+            <TextBlock x:Name="txtTime" Text="Time: 0.00s" Style="{StaticResource Value}"/>
+            <TextBlock x:Name="txtCoverage" Text="Coverage: 0.00%" Style="{StaticResource Value}"/>
+
+            <Separator Margin="0,10,0,6"/>
+
+            <!-- Header and button on the same line. A Grid instead of a
+                 StackPanel so the button stays on the right no matter how long
+                 the header is. -->
+            <Grid Margin="0,0,0,4">
+                <TextBlock Text="Peak stack" Style="{StaticResource Section}"
+                           VerticalAlignment="Center"/>
+                <Button x:Name="btnGoPeak" Content="Go to" Width="50" Padding="0"
+                        HorizontalAlignment="Right" Click="btnGoPeak_Click"/>
+            </Grid>
+
+            <TextBlock x:Name="txtPeakDepth" Text="Depth: -" Style="{StaticResource Value}"/>
+            <TextBlock x:Name="txtPeakRange" Text="" Style="{StaticResource Value}"/>
+            <TextBlock x:Name="txtPeakLeaf" Text="" Style="{StaticResource Mono}"
+                       ToolTip="{Binding RelativeSource={RelativeSource Self}, Path=Text}"/>
+
+            <Separator Margin="0,10,0,6"/>
+
+            <TextBlock Text="Selected" Style="{StaticResource Section}"/>
+
+            <TextBlock x:Name="txtSelectionFn" Text="-" Style="{StaticResource Mono}"
+                       ToolTip="{Binding RelativeSource={RelativeSource Self}, Path=Text}"/>
+            <TextBlock x:Name="txtSelectionLine" Text="" Style="{StaticResource Value}"/>
+            <TextBlock x:Name="txtSelectionRange" Text="" Style="{StaticResource Value}"/>
+            <TextBlock x:Name="txtSelectionDuration" Text="" Style="{StaticResource Value}"/>
+        </StackPanel>
+
+        <ScrollViewer Grid.Column="1" x:Name="scroller"
+                      HorizontalScrollBarVisibility="Auto"
+                      VerticalScrollBarVisibility="Auto">
+            <!-- Left/Top alignment keeps the chart at the size it measures
+                 itself instead of stretching it to the ScrollViewer, otherwise
+                 there is nothing to scroll. -->
+            <local:FlameChartView x:Name="chart"
+                                  HorizontalAlignment="Left"
+                                  VerticalAlignment="Top"/>
+        </ScrollViewer>
+    </Grid>
+</UserControl>
